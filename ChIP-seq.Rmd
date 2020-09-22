@@ -27,7 +27,7 @@ cat shell_variables_ChIP-seq.sh
 
 * genome annotation (GFF): ftp://ftp.pombase.org/pombe/genome_sequence_and_features/gff3/ (downloaded `r date()`)
 
-* genomic coordinates of rDNA and heterochromatic subtelomeric regions were determined visually in IGV using the input and H3K9me2 ChIP-seq data
+* genomic coordinates of rDNA and heterochromatic subtelomeric regions were determined visually in IGV using the input and H3K9me2 ChIP-seq data, respectively
 
 ```{bash}
 bedtools --version
@@ -55,10 +55,6 @@ bedtools shuffle -noOverlapping -chrom -i "${genome_dir}LTRs.bed" -g "${genome_d
 
 # centromeres
 zcat "${genome_dir}Schizosaccharomyces_pombe_all_chromosomes.gff3.gz" | grep "\bregional_centromere\b" | bedtools sort -i - | cut -f1,4,5 | awk '{print $1"\t"$2-1"\t"$3}' - > "${genome_dir}centromeres.bed"
-
-zcat "${genome_dir}Schizosaccharomyces_pombe_all_chromosomes.gff3.gz" | grep "\bdh_repeat\b" | bedtools sort -i - | cut -f1,4,5 | awk '{print $1"\t"$2-1"\t"$3}' - > "${genome_dir}dh.bed"
-
-zcat "${genome_dir}Schizosaccharomyces_pombe_all_chromosomes.gff3.gz" | grep "\bdg_repeat\b" | bedtools sort -i - | cut -f1,4,5 | awk '{print $1"\t"$2-1"\t"$3}' - > "${genome_dir}dg.bed"
 
 # rDNA
 printf "III\t0\t24600\nIII\t2439500\t2452883" > "${genome_dir}rDNA.bed"
@@ -275,13 +271,8 @@ computeMatrix scale-regions -S "${coverage_dir}dbl2_a-H3K9me2_ChIP1.H3norm_5.WTn
 
 plotHeatmap -m "${coverage_dir}computeMatrix_ChIP-seq_LTR2.mat.gz" -out "${image_dir}plotHeatmap_ChIP-seq_LTR2.svg" --colorMap Greys --labelRotation 45 --startLabel "start" --endLabel "end" --regionsLabel "LTRs (n=239)" "matched random regions (n=239)" --samplesLabel "dbl2/WT r1" "WT r1" "dbl2 r1" "dbl2/WT r2" "WT r2" "dbl2 r2" --whatToShow "plot, heatmap and colorbar" --outFileNameMatrix "${coverage_dir}plotHeatmap_ChIP-seq_LTR2.tab" --zMax 2
 
-
 # centromeres, subtelomeres, rDNA
 multiBigwigSummary BED-file -b "${coverage_dir}dbl2_a-H3K9me2_ChIP1.H3norm_5.WTnorm.bw" "${coverage_dir}dbl2_a-H3K9me2_ChIP2.H3norm_5.WTnorm.bw" --outFileName "${coverage_dir}centromeres.npz" --BED "${genome_dir}centromeres.bed" --numberOfProcessors "${CPU}" --outRawCounts "${coverage_dir}centromeres.tab"
-
-multiBigwigSummary BED-file -b "${coverage_dir}dbl2_a-H3K9me2_ChIP1.H3norm_5.WTnorm.bw" "${coverage_dir}dbl2_a-H3K9me2_ChIP2.H3norm_5.WTnorm.bw" --outFileName "${coverage_dir}dh.npz" --BED "${genome_dir}dh.bed" --numberOfProcessors "${CPU}" --outRawCounts "${coverage_dir}dh.tab"
-
-multiBigwigSummary BED-file -b "${coverage_dir}dbl2_a-H3K9me2_ChIP1.H3norm_5.WTnorm.bw" "${coverage_dir}dbl2_a-H3K9me2_ChIP2.H3norm_5.WTnorm.bw" --outFileName "${coverage_dir}dg.npz" --BED "${genome_dir}dg.bed" --numberOfProcessors "${CPU}" --outRawCounts "${coverage_dir}dg.tab"
 
 multiBigwigSummary BED-file -b "${coverage_dir}dbl2_a-H3K9me2_ChIP1.H3norm_5.WTnorm.bw" "${coverage_dir}dbl2_a-H3K9me2_ChIP2.H3norm_5.WTnorm.bw" --outFileName "${coverage_dir}subtelomeres.npz" --BED "${genome_dir}subtelomeres.bed" --numberOfProcessors "${CPU}" --outRawCounts "${coverage_dir}subtelomeres.tab"
 
@@ -290,37 +281,10 @@ multiBigwigSummary BED-file -b "${coverage_dir}dbl2_a-H3K9me2_ChIP1.H3norm_5.WTn
 
 ```{r, eval=TRUE}
 centromeres <- read.delim(paste0(coverage_dir, 'centromeres.tab'), stringsAsFactors = FALSE, quote = "'")
-dh <- read.delim(paste0(coverage_dir, 'dh.tab'), stringsAsFactors = FALSE, quote = "'")
-dg <- read.delim(paste0(coverage_dir, 'dg.tab'), stringsAsFactors = FALSE, quote = "'")
 subtelomeres <- read.delim(paste0(coverage_dir, 'subtelomeres.tab'), stringsAsFactors = FALSE, quote = "'")
 subtelomeres <- subtelomeres[order(subtelomeres[, 1], subtelomeres[, 2]), ]
 rDNA <- read.delim(paste0(coverage_dir, 'rDNA.tab'), stringsAsFactors = FALSE, quote = "'")
 rDNA <- rDNA[order(rDNA[, 1], rDNA[, 2]), ]
-
-par(mfrow = c(2, 5), las = 3)
-barplot(2 ^ centromeres[, 4], names.arg = paste('cen', centromeres[, 1], sep = ' '), 
-        ylab = 'H3K9me2 fold enrichment in dbl2Δ')
-abline(h = 1)
-barplot(2 ^ mean(dh[, 4], na.rm = TRUE), names.arg = 'dh repeats')
-abline(h = 1)
-barplot(2 ^ mean(dg[, 4], na.rm = TRUE), names.arg = 'dg repeats')
-abline(h = 1)
-barplot(2 ^ subtelomeres[, 4], names.arg = c('subtel IL', 'subtel IR', 'subtel IIL', 'subtel IIR'))
-abline(h = 1)
-barplot(2 ^ mean(rDNA[, 4], na.rm = TRUE), names.arg = 'rDNA')
-abline(h = 1)
-
-barplot(2 ^ centromeres[, 5], names.arg = paste('cen', centromeres[, 1], sep = ' '), 
-        ylab = 'H3K9me2 fold enrichment in dbl2Δ')
-abline(h = 1)
-barplot(2 ^ mean(dh[, 5], na.rm = TRUE), names.arg = 'dh repeats')
-abline(h = 1)
-barplot(2 ^ mean(dg[, 5], na.rm = TRUE), names.arg = 'dg repeats')
-abline(h = 1)
-barplot(2 ^ subtelomeres[, 5], names.arg = c('subtel IL', 'subtel IR', 'subtel IIL', 'subtel IIR'))
-abline(h = 1)
-barplot(2 ^ mean(rDNA[, 5], na.rm = TRUE), names.arg = 'rDNA')
-abline(h = 1)
 
 cairo_pdf(file = paste0(image_dir, 'cen_subtel_rDNA_barplots.pdf'))
 par(las = 3, mfrow = c(1, 2))
@@ -346,9 +310,9 @@ text(x = tmp, y = 0, c(paste0(centromeres[, 2], '-', centromeres[, 3], ' nt'),
                        paste0(subtelomeres[, 2], '-', subtelomeres[, 3], ' nt'),
                        paste0(rDNA[, 2], '-', rDNA[, 3], ' nt')),
      srt = 90, adj = c(0, 0.5))
+dev.off()
 
 rm(tmp)
-dev.off()
 ```
 
 ***
