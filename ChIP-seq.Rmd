@@ -1,0 +1,358 @@
+---
+title: "ChIP-seq analysis of H3K9me2 in dbl2 mutant"
+author: "Martin Převorovský, prevorov@natur.cuni.cz, http://www.GenoMik.cz"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+genome_dir <- './genome/'
+bam_dir <- './BAM_ChIP-seq/'
+coverage_dir <- './coverage_ChIP-seq/'
+QC_dir <- './QC_ChIP-seq/'
+QC_trim_dir <- './QC_trim_ChIP-seq/'
+image_dir <- './images/'
+```
+
+Variables for shell scripts are stored in the file "shell_variables_ChIP-seq.sh" and can be modified as needed:
+
+```{bash list_variables}
+cat shell_variables_ChIP-seq.sh
+```
+
+# *Schizosaccharomyces pombe* genome sequence and annotation
+
+* genome was downloaded from ftp://ftp.pombase.org/pombe/genome_sequence_and_features/genome_sequence/ (downloaded `r date()`)
+
+* genome annotation (GFF): ftp://ftp.pombase.org/pombe/genome_sequence_and_features/gff3/ (downloaded `r date()`)
+
+* genomic coordinates of rDNA and heterochromatic subtelomeric regions were determined visually in IGV using the input and H3K9me2 ChIP-seq data
+
+```{bash}
+bedtools --version
+```
+
+```{bash, message=FALSE, eval=TRUE}
+source shell_variables_ChIP-seq.sh
+
+mkdir -p "${genome_dir}"
+wget -N --directory-prefix="${genome_dir}"  ftp://ftp.pombase.org/pombe/genome_sequence_and_features/genome_sequence/Schizosaccharomyces_pombe_chromosome_I.fa.gz
+wget -N --directory-prefix="${genome_dir}"  ftp://ftp.pombase.org/pombe/genome_sequence_and_features/genome_sequence/Schizosaccharomyces_pombe_chromosome_II.fa.gz
+wget -N --directory-prefix="${genome_dir}"  ftp://ftp.pombase.org/pombe/genome_sequence_and_features/genome_sequence/Schizosaccharomyces_pombe_chromosome_III.fa.gz
+wget -N --directory-prefix="${genome_dir}" ftp://ftp.pombase.org/pombe/genome_sequence_and_features/genome_sequence/Schizosaccharomyces_pombe_mitochondrial_chromosome.fa.gz
+zcat `ls "${genome_dir}"* | grep fa.gz$` > "${genome}"
+
+wget -N --directory-prefix="${genome_dir}"  ftp://ftp.pombase.org/pombe/genome_sequence_and_features/gff3/Schizosaccharomyces_pombe_all_chromosomes.gff3.gz
+
+samtools faidx "${genome}"
+cut -f1,2 "${genome}.fai" > "${genome_dir}chrom.sizes"
+
+# LTRs
+zcat "${genome_dir}Schizosaccharomyces_pombe_all_chromosomes.gff3.gz" | grep "\blong_terminal_repeat\b" | bedtools sort -i - | cut -f1,4,5 | awk '{print $1"\t"$2-1"\t"$3}' - > "${genome_dir}LTRs.bed"
+
+bedtools shuffle -noOverlapping -chrom -i "${genome_dir}LTRs.bed" -g "${genome_dir}chrom.sizes" > "${genome_dir}LTRs_randomized_control.bed"
+
+# centromeres
+zcat "${genome_dir}Schizosaccharomyces_pombe_all_chromosomes.gff3.gz" | grep "\bregional_centromere\b" | bedtools sort -i - | cut -f1,4,5 | awk '{print $1"\t"$2-1"\t"$3}' - > "${genome_dir}centromeres.bed"
+
+zcat "${genome_dir}Schizosaccharomyces_pombe_all_chromosomes.gff3.gz" | grep "\bdh_repeat\b" | bedtools sort -i - | cut -f1,4,5 | awk '{print $1"\t"$2-1"\t"$3}' - > "${genome_dir}dh.bed"
+
+zcat "${genome_dir}Schizosaccharomyces_pombe_all_chromosomes.gff3.gz" | grep "\bdg_repeat\b" | bedtools sort -i - | cut -f1,4,5 | awk '{print $1"\t"$2-1"\t"$3}' - > "${genome_dir}dg.bed"
+
+# rDNA
+printf "III\t0\t24600\nIII\t2439500\t2452883" > "${genome_dir}rDNA.bed"
+
+# subtelomeres
+printf "I\t0\t35800\nI\t5527000\t5579133" > "${genome_dir}subtelomeres.bed"
+printf "\nII\t0\t15900\nII\t4497000\t4539804" >> "${genome_dir}subtelomeres.bed"
+```
+
+# QC of raw sequence reads
+
+Technical quality of library construction and sequencing run was tested using fastQC
+
+```{bash}
+fastqc --version
+multiqc --version
+```
+
+```{bash, eval=TRUE}
+source shell_variables_ChIP-seq.sh
+
+mkdir -p "${QC_dir}"
+ls -1 "${fastq_dir}" | grep "${fastq_file_ext}" > "${fastq_file_list}"
+fastq_files=`cat "${fastq_file_list}"`
+for i in ${fastq_files};
+do
+  fastqc --quiet --outdir "${QC_dir}" --threads "${CPU}" "${fastq_dir}${i}"
+done
+
+multiqc -f -i ChIP-seq_histones_dbl2 -o "${QC_dir}" "${QC_dir}"
+```
+
+Results of QC:
+
+* 35 nt PE reads, reads have been already adapter-trimmed by the facility to 22-35 nt
+
+* 7.1-46M read pairs per sample
+
+* no adapter contamination detected here
+
+* 19 samples give error/warning on high read duplication levels (normal and OK for ChIP-seq from a small genome)
+
+* all 24 FASTQ files give error on per base sequence content (positions 34-35 look aberrant)
+
+* 9 samples give warning on per sequence GC content (reads contain a fraction of super G-rich sequences)
+
+* 9 samples give warning on overrepresented sequences (polyG and polyN reads)
+
+* read quality scores deteriorate towards the end → 3' end trimming of reads is needed
+
+# Read trimming
+
+* remove sequence at positions 34-35
+
+* trim parts of the reads where average base quality in a 4 nt window drops below 20
+
+* only keep trimmed reads that are at least 20 nt long
+
+```{bash}
+java -jar /opt/Trimmomatic-0.39/trimmomatic-0.39.jar -version
+```
+
+```{bash, eval=TRUE}
+source shell_variables_ChIP-seq.sh
+
+mkdir -p "${fastq_trim_dir}"
+fastq_files_1=( $(ls -1 "${fastq_dir}" | grep "_R1_.*${fastq_file_ext}") )
+fastq_files_2=( $(ls -1 "${fastq_dir}" | grep "_R2_.*${fastq_file_ext}") )
+for i in ${!fastq_files_1[@]};
+do
+  java -jar /opt/Trimmomatic-0.39/trimmomatic-0.39.jar PE -phred33 -threads "${CPU}" "${fastq_dir}${fastq_files_1[${i}]}" "${fastq_dir}${fastq_files_2[${i}]}" "${fastq_trim_dir}${fastq_files_1[${i}]}.trim.fastq.gz" /dev/null "${fastq_trim_dir}${fastq_files_2[${i}]}.trim.fastq.gz" /dev/null CROP:33 SLIDINGWINDOW:4:20 MINLEN:20
+done
+ls -1 "${fastq_trim_dir}" | grep "${fastq_file_ext}" > "${fastq_trim_file_list}"
+```
+
+Reads whose mate was dropped during filtering were discarded (sent to /dev/null).
+
+# QC of trimmed sequence reads
+
+Effects of trimming were determined by fastQC.
+
+```{bash, eval=TRUE}
+source shell_variables_ChIP-seq.sh
+
+mkdir -p "${QC_trim_dir}"
+fastq_files=`cat "${fastq_trim_file_list}"`
+for i in ${fastq_files};
+do
+  fastqc --quiet --outdir "${QC_trim_dir}" --threads "${CPU}" "${fastq_trim_dir}${i}"
+done
+
+multiqc -f -i ChIP-seq_histones_dbl2_trimmed -o "${QC_trim_dir}" "${QC_trim_dir}"
+```
+
+Results of QC:
+
+* dropped ~12-34% of read pairs (mostly below 20%)
+
+* 20-33 nt reads (vast majority of reads are 33 nt)
+
+* read quality scores now OK
+
+* 3 FASTQ files still give warning on per base sequence content (not sure why)
+
+# Read mapping into *S. pombe* genome
+
+```{bash}
+hisat2 --version
+samtools --version
+```
+
+```{bash, eval=TRUE}
+source shell_variables_ChIP-seq.sh
+
+# build HISAT2 index
+hisat2-build --quiet -p "${CPU}" "${genome}" "${genome}"
+
+# map
+mkdir -p "${bam_dir}"
+fastq_files_1=( $(ls -1 "${fastq_trim_dir}" | grep "_R1_.*${fastq_file_ext}") )
+fastq_files_2=( $(ls -1 "${fastq_trim_dir}" | grep "_R2_.*${fastq_file_ext}") )
+for i in ${!fastq_files_1[@]};
+do
+	infile1="${fastq_trim_dir}${fastq_files_1[${i}]}"
+	infile2="${fastq_trim_dir}${fastq_files_2[${i}]}"
+	outfile="${bam_dir}${fastq_files_1[${i}]}.bam"
+  echo "${outfile}"
+	hisat2 -x "${genome}" -1 "${infile1}" -2 "${infile2}" --threads "${CPU}" --no-spliced-alignment -k 15 --summary-file "${outfile}.log" | samtools view -b -F 256 --threads "${CPU}" - | samtools sort --threads "${CPU}" -o "${outfile}" - 
+	samtools index "${outfile}"
+	samtools view -c --threads "${CPU}" "${outfile}"
+done
+```
+
+Notes
+
+* since signal is expected at repeat regions, HISAT was set to search for up to 15 matching positions (this allows even for testing all Tf2 and dh/dg repeats in the genome), then only the best (marked as primary by HISAT) alignment was kept
+
+# QC of mapped samples
+
+WARNING - completion of this step can take A LOT of time!
+
+```{bash}
+deeptools --version
+```
+
+```{bash, eval=FALSE}
+source shell_variables_ChIP-seq.sh
+
+mkdir -p "${image_dir}"
+bam_files=( $(ls -1 -d "${bam_dir}"* | grep "\.bam$") )
+multiBamSummary bins --binSize "${bin_size}" -p "${CPU}" --extendReads --ignoreDuplicates -o "${bam_dir}${bam_summary_file}" --bamfiles "${bam_files[@]}"
+plotPCA -in "${bam_dir}${bam_summary_file}" -o "${image_dir}ChIP-seq_plotPCA.pdf"
+plotCorrelation -in "${bam_dir}${bam_summary_file}" -o "${image_dir}ChIP-seq_plotCorrelation.pdf" --corMethod pearson --whatToPlot heatmap --removeOutliers
+```
+
+# Calculate genome coverage tracks
+
+## Create genome coverage files for each sample
+
+```{bash, eval=TRUE}
+source shell_variables_ChIP-seq.sh
+
+mkdir -p "${coverage_dir}"
+mapfile -t bam_files < <(ls -1 "${bam_dir}" | grep "\.bam$")
+for i in ${!bam_files[@]};
+do
+	input_file="${bam_dir}${bam_files[${i}]}"
+	bamCoverage --binSize "${bin_size}" --normalizeUsing CPM -p "${CPU}" --extendReads --ignoreDuplicates --bam "${input_file}" -o "${coverage_dir}${bam_files[${i}]}.bw" #--scaleFactor "${scaling_factor}"
+done
+```
+
+Notes
+
+* Checked the genotypes visually in IGV → OK.
+
+* Samples nicely cluster according to IP type. Inputs cluster by biological replicate.
+
+## Normalize H3K9me2 to H3
+
+```{bash, eval=TRUE}
+source shell_variables_ChIP-seq.sh
+bin_size=5
+
+bigwigCompare -b1 "${coverage_dir}SB65_a-H3K9me2_ChIP1_S2_R1_001.fastq.gz.trim.fastq.gz.bam.bw" -b2 "${coverage_dir}SB65_a-H3_ChIP1_S1_R1_001.fastq.gz.trim.fastq.gz.bam.bw" --operation log2 --binSize "${bin_size}" -p "${CPU}" -o "${coverage_dir}SB65_a-H3K9me2_ChIP1.H3norm_${bin_size}.bw"
+	
+bigwigCompare -b1 "${coverage_dir}SB65_a-H3K9me2_ChIP2_S8_R1_001.fastq.gz.trim.fastq.gz.bam.bw" -b2 "${coverage_dir}SB65_a-H3_ChIP2_S7_R1_001.fastq.gz.trim.fastq.gz.bam.bw" --operation log2 --binSize "${bin_size}" -p "${CPU}" -o "${coverage_dir}SB65_a-H3K9me2_ChIP2.H3norm_${bin_size}.bw"
+
+bigwigCompare -b1 "${coverage_dir}SB973_aH3K9me2_ChIP1_S5_R1_001.fastq.gz.trim.fastq.gz.bam.bw" -b2 "${coverage_dir}SB973_a-H3_ChIP1_S4_R1_001.fastq.gz.trim.fastq.gz.bam.bw" --operation log2 --binSize "${bin_size}" -p "${CPU}" -o "${coverage_dir}SB973_a-H3K9me2_ChIP1.H3norm_${bin_size}.bw"
+
+bigwigCompare -b1 "${coverage_dir}SB973_aH3K9me2_ChIP2_S11_R1_001.fastq.gz.trim.fastq.gz.bam.bw" -b2 "${coverage_dir}SB973_aH3_ChIP2_S10_R1_001.fastq.gz.trim.fastq.gz.bam.bw" --operation log2 --binSize "${bin_size}" -p "${CPU}" -o "${coverage_dir}SB973_a-H3K9me2_ChIP2.H3norm_${bin_size}.bw"
+```
+
+## Normalize dbl2KO values to WT
+
+```{bash, eval=TRUE}
+source shell_variables_ChIP-seq.sh
+
+bigwigCompare -b1 "${coverage_dir}SB973_a-H3K9me2_ChIP1.H3norm_5.bw" -b2 "${coverage_dir}SB65_a-H3K9me2_ChIP1.H3norm_5.bw" --operation subtract --binSize "${bin_size}" -p "${CPU}" -o "${coverage_dir}dbl2_a-H3K9me2_ChIP1.H3norm_5.WTnorm.bw"
+
+bigwigCompare -b1 "${coverage_dir}SB973_a-H3K9me2_ChIP2.H3norm_5.bw" -b2 "${coverage_dir}SB65_a-H3K9me2_ChIP2.H3norm_5.bw" --operation subtract --binSize "${bin_size}" -p "${CPU}" -o "${coverage_dir}dbl2_a-H3K9me2_ChIP2.H3norm_5.WTnorm.bw"
+```
+
+# Final analysis and figures
+
+```{bash, eval=TRUE}
+source shell_variables_ChIP-seq.sh
+
+# heatmap
+computeMatrix scale-regions -S "${coverage_dir}dbl2_a-H3K9me2_ChIP1.H3norm_5.WTnorm.bw" "${coverage_dir}dbl2_a-H3K9me2_ChIP2.H3norm_5.WTnorm.bw" -R "${genome_dir}LTRs.bed" "${genome_dir}LTRs_randomized_control.bed" --beforeRegionStartLength 1000 --regionBodyLength 350 --afterRegionStartLength 1000 --outFileName "${coverage_dir}computeMatrix_ChIP-seq_LTR.mat.gz" --numberOfProcessors "${CPU}"
+
+plotHeatmap -m "${coverage_dir}computeMatrix_ChIP-seq_LTR.mat.gz" -out "${image_dir}plotHeatmap_ChIP-seq_LTR.svg" --colorMap Greys --labelRotation 45 --startLabel "start" --endLabel "end" --regionsLabel "LTRs" "control loci" --samplesLabel "dbl2/WT run 1" "dbl2/WT run 2" --whatToShow "plot, heatmap and colorbar" --outFileNameMatrix "${coverage_dir}plotHeatmap_ChIP-seq_LTR.tab"
+
+computeMatrix scale-regions -S "${coverage_dir}dbl2_a-H3K9me2_ChIP1.H3norm_5.WTnorm.bw" "${coverage_dir}SB65_a-H3K9me2_ChIP1.H3norm_5.bw" "${coverage_dir}SB973_a-H3K9me2_ChIP1.H3norm_5.bw" "${coverage_dir}dbl2_a-H3K9me2_ChIP2.H3norm_5.WTnorm.bw" "${coverage_dir}SB65_a-H3K9me2_ChIP2.H3norm_5.bw" "${coverage_dir}SB973_a-H3K9me2_ChIP2.H3norm_5.bw" -R "${genome_dir}LTRs.bed" "${genome_dir}LTRs_randomized_control.bed" --beforeRegionStartLength 1000 --regionBodyLength 350 --afterRegionStartLength 1000 --outFileName "${coverage_dir}computeMatrix_ChIP-seq_LTR2.mat.gz" --numberOfProcessors "${CPU}"
+
+plotHeatmap -m "${coverage_dir}computeMatrix_ChIP-seq_LTR2.mat.gz" -out "${image_dir}plotHeatmap_ChIP-seq_LTR2.svg" --colorMap Greys --labelRotation 45 --startLabel "start" --endLabel "end" --regionsLabel "LTRs (n=239)" "matched random regions (n=239)" --samplesLabel "dbl2/WT r1" "WT r1" "dbl2 r1" "dbl2/WT r2" "WT r2" "dbl2 r2" --whatToShow "plot, heatmap and colorbar" --outFileNameMatrix "${coverage_dir}plotHeatmap_ChIP-seq_LTR2.tab" --zMax 2
+
+
+# centromeres, subtelomeres, rDNA
+multiBigwigSummary BED-file -b "${coverage_dir}dbl2_a-H3K9me2_ChIP1.H3norm_5.WTnorm.bw" "${coverage_dir}dbl2_a-H3K9me2_ChIP2.H3norm_5.WTnorm.bw" --outFileName "${coverage_dir}centromeres.npz" --BED "${genome_dir}centromeres.bed" --numberOfProcessors "${CPU}" --outRawCounts "${coverage_dir}centromeres.tab"
+
+multiBigwigSummary BED-file -b "${coverage_dir}dbl2_a-H3K9me2_ChIP1.H3norm_5.WTnorm.bw" "${coverage_dir}dbl2_a-H3K9me2_ChIP2.H3norm_5.WTnorm.bw" --outFileName "${coverage_dir}dh.npz" --BED "${genome_dir}dh.bed" --numberOfProcessors "${CPU}" --outRawCounts "${coverage_dir}dh.tab"
+
+multiBigwigSummary BED-file -b "${coverage_dir}dbl2_a-H3K9me2_ChIP1.H3norm_5.WTnorm.bw" "${coverage_dir}dbl2_a-H3K9me2_ChIP2.H3norm_5.WTnorm.bw" --outFileName "${coverage_dir}dg.npz" --BED "${genome_dir}dg.bed" --numberOfProcessors "${CPU}" --outRawCounts "${coverage_dir}dg.tab"
+
+multiBigwigSummary BED-file -b "${coverage_dir}dbl2_a-H3K9me2_ChIP1.H3norm_5.WTnorm.bw" "${coverage_dir}dbl2_a-H3K9me2_ChIP2.H3norm_5.WTnorm.bw" --outFileName "${coverage_dir}subtelomeres.npz" --BED "${genome_dir}subtelomeres.bed" --numberOfProcessors "${CPU}" --outRawCounts "${coverage_dir}subtelomeres.tab"
+
+multiBigwigSummary BED-file -b "${coverage_dir}dbl2_a-H3K9me2_ChIP1.H3norm_5.WTnorm.bw" "${coverage_dir}dbl2_a-H3K9me2_ChIP2.H3norm_5.WTnorm.bw" --outFileName "${coverage_dir}rDNA.npz" --BED "${genome_dir}rDNA.bed" --numberOfProcessors "${CPU}" --outRawCounts "${coverage_dir}rDNA.tab"
+```
+
+```{r, eval=TRUE}
+centromeres <- read.delim(paste0(coverage_dir, 'centromeres.tab'), stringsAsFactors = FALSE, quote = "'")
+dh <- read.delim(paste0(coverage_dir, 'dh.tab'), stringsAsFactors = FALSE, quote = "'")
+dg <- read.delim(paste0(coverage_dir, 'dg.tab'), stringsAsFactors = FALSE, quote = "'")
+subtelomeres <- read.delim(paste0(coverage_dir, 'subtelomeres.tab'), stringsAsFactors = FALSE, quote = "'")
+subtelomeres <- subtelomeres[order(subtelomeres[, 1], subtelomeres[, 2]), ]
+rDNA <- read.delim(paste0(coverage_dir, 'rDNA.tab'), stringsAsFactors = FALSE, quote = "'")
+rDNA <- rDNA[order(rDNA[, 1], rDNA[, 2]), ]
+
+par(mfrow = c(2, 5), las = 3)
+barplot(2 ^ centromeres[, 4], names.arg = paste('cen', centromeres[, 1], sep = ' '), 
+        ylab = 'H3K9me2 fold enrichment in dbl2Δ')
+abline(h = 1)
+barplot(2 ^ mean(dh[, 4], na.rm = TRUE), names.arg = 'dh repeats')
+abline(h = 1)
+barplot(2 ^ mean(dg[, 4], na.rm = TRUE), names.arg = 'dg repeats')
+abline(h = 1)
+barplot(2 ^ subtelomeres[, 4], names.arg = c('subtel IL', 'subtel IR', 'subtel IIL', 'subtel IIR'))
+abline(h = 1)
+barplot(2 ^ mean(rDNA[, 4], na.rm = TRUE), names.arg = 'rDNA')
+abline(h = 1)
+
+barplot(2 ^ centromeres[, 5], names.arg = paste('cen', centromeres[, 1], sep = ' '), 
+        ylab = 'H3K9me2 fold enrichment in dbl2Δ')
+abline(h = 1)
+barplot(2 ^ mean(dh[, 5], na.rm = TRUE), names.arg = 'dh repeats')
+abline(h = 1)
+barplot(2 ^ mean(dg[, 5], na.rm = TRUE), names.arg = 'dg repeats')
+abline(h = 1)
+barplot(2 ^ subtelomeres[, 5], names.arg = c('subtel IL', 'subtel IR', 'subtel IIL', 'subtel IIR'))
+abline(h = 1)
+barplot(2 ^ mean(rDNA[, 5], na.rm = TRUE), names.arg = 'rDNA')
+abline(h = 1)
+
+cairo_pdf(file = paste0(image_dir, 'cen_subtel_rDNA_barplots.pdf'))
+par(las = 3, mfrow = c(1, 2))
+tmp <- barplot(c(2 ^ centromeres[, 4], 2 ^ subtelomeres[, 4], 2 ^ rDNA[, 4]), 
+        names.arg = c(paste('cen', centromeres[, 1], sep = ' '), 
+                      c('subtel IL', 'subtel IR', 'subtel IIL', 'subtel IIR'),
+                      c('rDNA IIIL', 'rDNA IIIR')), 
+        ylab = 'H3K9me2 fold enrichment in dbl2Δ', main = 'run 1',
+        col = c(rep('grey90', nrow(centromeres)), rep('grey70', nrow(subtelomeres)), rep('grey50', nrow(rDNA))))
+abline(h = 1)
+text(x = tmp, y = 0, c(paste0(centromeres[, 2], '-', centromeres[, 3], ' nt'),
+                       paste0(subtelomeres[, 2], '-', subtelomeres[, 3], ' nt'),
+                       paste0(rDNA[, 2], '-', rDNA[, 3], ' nt')),
+     srt = 90, adj = c(0, 0.5))
+tmp <- barplot(c(2 ^ centromeres[, 5], 2 ^ subtelomeres[, 5], 2 ^ rDNA[, 5]), 
+        names.arg = c(paste('cen', centromeres[, 1], sep = ' '), 
+                      c('subtel IL', 'subtel IR', 'subtel IIL', 'subtel IIR'),
+                      c('rDNA IIIL', 'rDNA IIIR')), 
+        ylab = 'H3K9me2 fold enrichment in dbl2Δ', main = 'run 2', 
+        col = c(rep('grey90', nrow(centromeres)), rep('grey70', nrow(subtelomeres)), rep('grey50', nrow(rDNA))))
+abline(h = 1)
+text(x = tmp, y = 0, c(paste0(centromeres[, 2], '-', centromeres[, 3], ' nt'),
+                       paste0(subtelomeres[, 2], '-', subtelomeres[, 3], ' nt'),
+                       paste0(rDNA[, 2], '-', rDNA[, 3], ' nt')),
+     srt = 90, adj = c(0, 0.5))
+
+rm(tmp)
+dev.off()
+```
+
+***
+
+```{r}
+sessionInfo()
+```
